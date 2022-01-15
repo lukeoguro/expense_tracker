@@ -1,0 +1,149 @@
+#! /usr/bin/env ruby
+
+require 'pg'
+require 'date'
+require 'io/console'
+
+class ExpenseData
+  def initialize
+    @connection = PG.connect(dbname: "expenses")
+    setup_schema
+  end
+
+  def list_expenses
+    result = @connection.exec("SELECT * FROM expenses ORDER BY created_on")
+
+    display_count(result)
+    display_expenses(result)
+  end
+
+  def add_expense(amount, memo)
+    date = Date.today
+    sql = "INSERT INTO expenses (amount, memo, created_on) VALUES ($1, $2, $3)"
+    @connection.exec_params(sql, [amount, memo, date])
+  end
+
+  def search_expenses(query)
+    sql = "SELECT * FROM expenses WHERE memo ILIKE $1 ORDER BY created_on"
+    result = @connection.exec_params(sql, ["%#{query}%"])
+
+    display_count(result)
+    display_expenses(result)
+  end
+
+  def delete_expense(id)
+    sql = "SELECT * FROM expenses WHERE id = $1"
+    result = @connection.exec_params(sql, [id])
+    if result.ntuples == 1
+      sql = "DELETE FROM expenses WHERE id = $1"
+      @connection.exec_params(sql, [id])
+
+      puts "The following expense has been deleted:"
+      display_expenses(result)
+    else
+      puts "There is no expense with the id '#{id}'."
+    end
+  end
+
+  def delete_all_expenses
+    sql = "DELETE FROM expenses"
+    @connection.exec(sql)
+    puts "All expenses have been deleted."
+  end
+
+  private
+
+  def display_expenses(expenses)
+    return unless expenses.ntuples > 0
+
+    expenses.each do |tuple|
+      puts "%3d | %10s | %12.2f | %-s" %
+        tuple.values_at('id', 'created_on', 'amount', 'memo')
+    end
+
+    sum = expenses.field_values('amount').map(&:to_f).sum
+
+    puts "-" * 50
+    puts "Total#{sum.to_s.rjust(26)}"
+  end
+
+  def display_count(result)
+    expenses_count = result.ntuples
+    if expenses_count.zero?
+      puts "There are no expenses."
+    elsif expenses_count == 1
+      puts "There is 1 expense."
+    else
+      puts "There are #{expenses_count} expenses."
+    end
+  end
+
+  def setup_schema
+    sql = "SELECT COUNT(*) FROM information_schema.tables "\
+          "WHERE table_schema = 'public' AND table_name = 'expenses'"
+
+    result = @connection.exec(sql)
+
+    count = result[0]["count"].to_i
+
+    if count.zero?
+      @connection.exec <<~SQL
+        CREATE TABLE expenses (
+        id serial PRIMARY KEY,
+        amount decimal(6,2)
+          NOT NULL
+          CHECK (amount > 0),
+        memo text NOT NULL,
+        created_on date NOT NULL
+      )
+      SQL
+    end
+  end
+end
+
+class CLI
+  def initialize
+    @application = ExpenseData.new
+  end
+
+  def run(arguments)
+    command = arguments.shift
+
+    case command
+    when 'add'
+      amount, memo = arguments
+      abort "You must provide an amount and memo." unless amount && memo
+      @application.add_expense(amount, memo)
+    when 'list'
+      @application.list_expenses
+    when 'search'
+      @application.search_expenses(arguments.first)
+    when 'delete'
+      @application.delete_expense(arguments.first)
+    when 'clear'
+      puts "This will remove all expenses. Are you sure? (y/n)"
+      response = STDIN.getch
+      @application.delete_all_expenses if response == 'y'
+    else
+      display_help
+    end
+  end
+
+  private
+
+  def display_help
+    puts <<~MSG
+      An expense recording system
+
+      Commands:
+
+      add AMOUNT MEMO [DATE] - record a new expense
+      clear - delete all expenses
+      list - list all expenses
+      delete NUMBER - remove expense with id NUMBER
+      search QUERY - list expenses with a matching memo field
+    MSG
+  end
+end
+
+CLI.new.run(ARGV)
